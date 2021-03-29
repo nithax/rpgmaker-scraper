@@ -25,6 +25,9 @@ Command::Command(const json &command_json) {
     code = static_cast<CommandCode>(command_json["code"].get<uint32_t>());
 
     for (const auto &parameter : command_json["parameters"]) {
+        if (parameter.is_null() || parameter.empty()) {
+            continue;
+        }
         if (parameter.is_number_integer()) {
             parameters.emplace_back(parameter.get<uint32_t>());
             continue;

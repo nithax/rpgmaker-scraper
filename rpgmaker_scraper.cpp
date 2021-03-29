@@ -7,6 +7,11 @@
 #include <fstream>
 #include <iomanip>
 
+// debug
+static constexpr bool is_debugging = false;
+static constexpr uint32_t debug_map_id = 5;
+static constexpr uint32_t debug_event_id = 130;
+
 using colors = logger::console_colors;
 
 void RPGMakerScraper::load() {
@@ -56,12 +61,17 @@ void RPGMakerScraper::load() {
 void RPGMakerScraper::scrape_maps() {
 
     for (const auto &[map_id, name] : map_info_names) {
+        // allow easy debugging
+        if (is_debugging && map_id != debug_map_id) {
+            continue;
+        }
+
         // give hacky visual progress
         progress_status = 
             utils::format_string(R"(scraping Map%03d...)", map_id);
         log_colored_nnl(colors::WHITE, colors::BLACK, "%s", progress_status.data());
 
-        log_colored_nnl(colors::WHITE, colors::BLACK, "%s", 
+        log_colored_nnl(colors::WHITE, colors::BLACK, "%s",
                         std::string(progress_status.length(), '\b').data());
 
         // check if the current map we're scraping exists
@@ -109,6 +119,10 @@ void RPGMakerScraper::scrape_variables() {
     for (const auto &[map_id, events] : all_events) {
         // go over every event
         for (const auto &event : events) {
+            // allow easy debugging
+            if (is_debugging && event.id != debug_event_id) {
+                continue;
+            }
             // go over event page in each event
             for (size_t page_num = 0, page_count = event.pages.size(); page_num < page_count; ++page_num) {
                 const auto &page = event.pages[page_num];
@@ -463,7 +477,11 @@ bool RPGMakerScraper::scrape_command_script(ResultInformation &result_info, cons
 
     constexpr uint32_t expected_param_count = 1;
 
-    if (!command.parameters.size() != expected_param_count) {
+    if (command.parameters.size() != expected_param_count) {
+        return false;
+    }
+
+    if (!std::holds_alternative<std::string>(command.parameters[0])) {
         return false;
     }
 
