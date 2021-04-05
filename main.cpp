@@ -3,16 +3,21 @@
 
 #include <fstream>
 
+using colors = logger::console_colors;
+
+void print_usage() {
+    log_colored(colors::RED, colors::BLACK,
+                "incorrect usage - please use the program like so:\n"
+                "RPGMakerScraper -v 143 test_output.txt\n"
+                "RPGMakerScraper -s 21");
+}
+
 int main(int argc, const char *argv[]) {
 
     constexpr uint32_t expected_minimum_argc = 3;
 
     constexpr const char *search_type_variables = "-v";
     constexpr const char *search_type_switches = "-s";
-
-    const auto print_usage = []() {
-        log_err(R"(Usage: RPGMakerScraper -v 143 test_output.txt)");
-    };
 
     // check the argument count
     if (argc < expected_minimum_argc) {
@@ -25,27 +30,40 @@ int main(int argc, const char *argv[]) {
 
     const bool output_to_file = argc == 4;
 
-    // check search types
-    if (search_type != search_type_variables) {
-        log_err(R"(invalid search type. Only '-v' for variables is supported at the moment.")");
+    // make sure this id is actually a number
+    if (!std::all_of(id_str.begin(), id_str.end(), isdigit)) {
+
+        const auto get_type_name = [&](std::string search_type) -> std::string {
+            static std::unordered_map<std::string, std::string> types = {
+                {search_type_variables, "variable"},
+                {search_type_switches, "switch"},
+            };
+
+            if (types.find(search_type) != types.end()) {
+                return types.at(search_type);
+            }
+
+            return "unsupported";
+        };
+
+        log_err(R"(invalid %s id. Please provide a number.")", get_type_name(search_type).data());
         print_usage();
         return 1;
     }
 
-    // search variable ids
-    if (search_type == search_type_variables) {
-        // make sure this id is actually a number
-        if (!std::all_of(id_str.begin(), id_str.end(), isdigit)) {
-            log_err(R"(invalid variable id. Please provide a number.")");
-            print_usage();
-            return 1;
+    const uint32_t id = static_cast<uint32_t>(std::stoul(id_str));
+
+    try {
+        // search variable ids
+        std::unique_ptr<RPGMakerScraper> scraper = nullptr;
+        if (search_type == search_type_variables) {
+            scraper = std::make_unique<RPGMakerScraper>(ScrapeMode::VARIABLES, id);
+        } else if (search_type == search_type_switches) {
+            scraper = std::make_unique<RPGMakerScraper>(ScrapeMode::SWITCHES, id);
         }
 
-        const uint32_t variable_id = static_cast<uint32_t>(std::stoul(id_str));
-
-        try {
-            RPGMakerScraper scraper{ScrapeMode::VARIABLES, variable_id};
-            scraper.scrape_variables();
+        if (scraper != nullptr) {
+            scraper->scrape();
 
             if (output_to_file) {
                 log_info(R"(writing results to %s...)", argv[3]);
@@ -61,10 +79,10 @@ int main(int argc, const char *argv[]) {
 
                 log_ok(R"(results wrote successfully.)");
             }
-
-        } catch (const std::exception &e) {
-            log_err(R"(exception caught: %s)", e.what());
         }
+
+    } catch (const std::exception &e) {
+        log_err(R"(exception caught: %s)", e.what());
     }
 
     log_nopre("\n");

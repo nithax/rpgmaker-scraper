@@ -13,6 +13,9 @@ list references to variable id '143'
 list references to variable id '24' and store the results in 'var_24.txt'
 > `RPGMakerScraper -v 24 var_24.txt`
 
+list references to switch id '27'
+> `RPGMakerScaper -s 27`
+
 it's that easy.
 
 ## notes
@@ -20,7 +23,6 @@ it's that easy.
 this was a quick and dirty side-project that piqued my interest. 
 so there's still a lot of stuff that needs to be done like:
 
-* adding RPGMaker 'switch' support
 * caching results so all the events don't need to be scraped anymore
 * fixing output to support wchar_t/unicode
 * finding results in a more optimized manner (maybe multithreading the parsing/scraping?)

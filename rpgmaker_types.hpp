@@ -14,8 +14,8 @@ using variable_element =
 namespace RPGMaker {
 
     enum class CommandCode : uint32_t {
-
         IF_STATEMENT = 111,
+        CONTROL_SWITCH = 121,
         CONTROL_VARIABLE = 122,
         SCRIPT_SINGLE_LINE = 355,
         SCRIPT_MULTI_LINE = 655,
@@ -60,6 +60,10 @@ namespace RPGMaker {
         }
         bool is_if_statement() const {
             return code == CommandCode::IF_STATEMENT;
+        }
+
+        bool is_control_switch() const {
+            return code == CommandCode::CONTROL_SWITCH;
         }
 
         bool is_control_variable() const {

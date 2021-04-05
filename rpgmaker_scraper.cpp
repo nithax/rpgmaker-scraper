@@ -7,12 +7,70 @@
 #include <fstream>
 #include <iomanip>
 
-// debug
+// lazy debug, set an id to UINT_MAX if you want to ignore it
 static constexpr bool is_debugging = false;
-static constexpr uint32_t debug_map_id = 5;
-static constexpr uint32_t debug_event_id = 130;
+static constexpr uint32_t debug_map_id = 999;
+static constexpr uint32_t debug_event_id = 1;
 
 using colors = logger::console_colors;
+using access_color = std::pair<std::string, colors>;
+
+static access_color get_access_info(const AccessType &access_type) {
+    static std::unordered_map<AccessType, access_color> info = {
+        {AccessType::NONE, {"NONE", colors::GRAY}},
+        {AccessType::READ, {"READ", colors::BLUE}},
+        {AccessType::READWRITE, {"READWRITE", colors::MAGENTA}},
+        {AccessType::WRITE, {"WRITE", colors::RED}},
+    };
+
+    if (info.find(access_type) != info.end()) {
+        return info.at(access_type);
+    }
+
+    return info.at(AccessType::NONE);
+}
+
+std::optional<std::string> RPGMakerScraper::get_map_name(uint32_t id) const {
+
+    if (map_info_names.empty() || map_info_names.find(id) == map_info_names.end()) {
+        return std::nullopt;
+    }
+    return map_info_names.at(id);
+}
+
+std::optional<std::string> RPGMakerScraper::get_variable_name(uint32_t id) const {
+
+    if (id == 0 || variable_names.empty() || variable_names.find(id) == variable_names.end()) {
+        return std::nullopt;
+    }
+
+    const std::string &name = variable_names.at(id);
+
+    if (name.empty()) {
+        return std::string("#") + std::to_string(id);
+    }
+
+    return name;
+}
+
+std::optional<std::string> RPGMakerScraper::get_switch_name(uint32_t id) const {
+
+    if (switch_names.empty()) {
+        return std::nullopt;
+    }
+
+    if (switch_names.find(id) == switch_names.end()) {
+        return std::string("#") + std::to_string(id) + " ?";
+    }
+
+    const std::string &name = switch_names.at(id);
+
+    if (name.empty()) {
+        return std::string("#") + std::to_string(id);
+    }
+
+    return name;
+}
 
 void RPGMakerScraper::load() {
 
@@ -29,27 +87,33 @@ void RPGMakerScraper::load() {
         throw std::logic_error("unable to populate map names");
     }
 
-    // handle verifying ids
+    log_info(R"(populating all the names...)");
+
+    // grab all the variable or switch names for later use
+    if (!populate_names()) {
+        throw std::logic_error("unable to populate names");
+    }
+
     if (mode == ScrapeMode::VARIABLES) {
-        log_info(R"(populating all the variable names...)");
-
-        // grab all the variable names for later use
-        if (!populate_variable_names()) {
-            throw std::logic_error("unable to populate variable names");
-        }
-
         log_info(R"(verifying variable id...)");
 
-        if (!get_variable_name(variable_id)) {
-            log_err(R"(variable #%03d doesn't exist as a predefined variable in this game!)", variable_id);
+        if (!get_variable_name(query_id)) {
+            log_err(R"(variable #%03d doesn't exist as a predefined variable in this game!)", query_id);
             throw std::invalid_argument("invalid variable id");
         }
 
         // setup variable name
-        variable_name = *get_variable_name(variable_id);
-    } else {
-        log_err(R"(only mode supported at the moment is variables)");
-        throw std::invalid_argument("unsupported scrape mode");
+        variable_name = *get_variable_name(query_id);
+    } else if (mode == ScrapeMode::SWITCHES) {
+        log_info(R"(verifying switch id...)");
+
+        if (!get_switch_name(query_id)) {
+            log_err(R"(switch #%03d doesn't exist as a predefined switch in this game!)", query_id);
+            throw std::invalid_argument("invalid switch id");
+        }
+
+        // setup variable name
+        switch_name = *get_switch_name(query_id);
     }
 
     // scrape all maps
@@ -62,12 +126,12 @@ void RPGMakerScraper::scrape_maps() {
 
     for (const auto &[map_id, name] : map_info_names) {
         // allow easy debugging
-        if (is_debugging && map_id != debug_map_id) {
+        if (is_debugging && (debug_map_id != UINT_MAX && map_id != debug_map_id)) {
             continue;
         }
 
         // give hacky visual progress
-        progress_status = 
+        progress_status =
             utils::format_string(R"(scraping Map%03d...)", map_id);
         log_colored_nnl(colors::WHITE, colors::BLACK, "%s", progress_status.data());
 
@@ -113,14 +177,14 @@ void RPGMakerScraper::scrape_maps() {
     }
 }
 
-void RPGMakerScraper::scrape_variables() {
+void RPGMakerScraper::scrape() {
 
     // go over every map
     for (const auto &[map_id, events] : all_events) {
         // go over every event
         for (const auto &event : events) {
             // allow easy debugging
-            if (is_debugging && event.id != debug_event_id) {
+            if (is_debugging && (debug_event_id != UINT_MAX && event.id != debug_event_id)) {
                 continue;
             }
             // go over event page in each event
@@ -149,6 +213,14 @@ void RPGMakerScraper::scrape_variables() {
 
                     if (line.is_control_variable()) {
                         if (scrape_command_control_variable(result_info, line)) {
+                            result_info.line_number = static_cast<uint32_t>(line_num) + 1;
+                            results[map_id].push_back(result_info);
+                            continue;
+                        }
+                    }
+
+                    if (line.is_control_switch()) {
+                        if (scrape_command_control_switch(result_info, line)) {
                             result_info.line_number = static_cast<uint32_t>(line_num) + 1;
                             results[map_id].push_back(result_info);
                             continue;
@@ -221,7 +293,7 @@ bool RPGMakerScraper::populate_map_names() {
     return true;
 }
 
-bool RPGMakerScraper::populate_variable_names() {
+bool RPGMakerScraper::populate_names() {
 
     constexpr const char *system_file_str = "System.json";
     const std::filesystem::path system_file_path = root_data_path / system_file_str;
@@ -240,17 +312,34 @@ bool RPGMakerScraper::populate_variable_names() {
     json system_json;
     system_file >> system_json;
 
-    if (!system_json.contains("variables")) {
-        log_err(R"(System.json doesn't contain variables!")");
-        system_file.close();
-        return false;
-    }
-
-    for (size_t var_id = 0, size = system_json["variables"].size(); var_id < size; ++var_id) {
-        if (system_json["variables"][var_id].is_null()) {
-            continue;
+    if (mode == ScrapeMode::VARIABLES) {
+        if (!system_json.contains("variables")) {
+            log_err(R"(System.json doesn't contain variables!")");
+            system_file.close();
+            return false;
         }
-        variable_names[static_cast<uint32_t>(var_id)] = system_json["variables"][var_id].get<std::string_view>();
+
+        for (size_t var_id = 0, size = system_json["variables"].size(); var_id < size; ++var_id) {
+            const auto &variable = system_json["variables"][var_id];
+            if (variable.is_null()) {
+                continue;
+            }
+            variable_names[static_cast<uint32_t>(var_id)] = variable.get<std::string_view>();
+        }
+    } else if (mode == ScrapeMode::SWITCHES) {
+        if (!system_json.contains("switches")) {
+            log_err(R"(System.json doesn't contain switches!")");
+            system_file.close();
+            return false;
+        }
+
+        for (size_t switch_id = 0, size = system_json["switches"].size(); switch_id < size; ++switch_id) {
+            const auto &_switch = system_json["switches"][switch_id];
+            if (_switch.is_null()) {
+                continue;
+            }
+            switch_names[static_cast<uint32_t>(switch_id)] = _switch.get<std::string_view>();
+        }
     }
 
     system_file.close();
@@ -265,23 +354,62 @@ std::string RPGMakerScraper::format_map_name(uint32_t id) const {
 
 std::string RPGMakerScraper::format_event_page_condition(const Condition &condition) {
 
-    return utils::format_string("IF {%s} >= %d:", variable_name.data(), condition.variable_value);
+    if (mode == ScrapeMode::VARIABLES) {
+        return utils::format_string("IF {%s} >= %d:", variable_name.data(), condition.variable_value);
+    } else if (mode == ScrapeMode::SWITCHES) {
+        std::string ret = "IF ";
+        // this is messy af but this is the cleanest way to represent this
+        // rpgmaker allows statements when switch2 is only valid for some god awful reason..
+        if (condition.switch1_valid && condition.switch2_valid) {
+            ret += utils::format_string("{%s} && {%s}",
+                                        (condition.switch1_valid ? get_switch_name(condition.switch1_id)->data() :
+                                         get_switch_name(condition.switch2_id)->data()),
+                                        (condition.switch2_valid ? get_switch_name(condition.switch2_id)->data() :
+                                         get_switch_name(condition.switch1_id)->data()));
+        } else if (condition.switch1_valid) {
+            ret += utils::format_string("{%s}", get_switch_name(condition.switch1_id)->data());
+        }
+        else if (condition.switch2_valid) {
+            ret += utils::format_string("{%s}", get_switch_name(condition.switch2_id)->data());
+        }
+        ret += ":";
+        return ret;
+    }
+
+    return unsupported;
 }
 
 bool RPGMakerScraper::scrape_event_page_condition(ResultInformation &result_info, const EventPage &event_page) {
 
-    if (event_page.conditions.variable_id != variable_id) {
-        return false;
-    }
+    if (mode == ScrapeMode::VARIABLES) {
+        if (event_page.conditions.variable_id != query_id) {
+            return false;
+        }
 
-    // hacky check since RPGMaker's default id is '1'.
-    // so to prevent possible wrong results, we're going to ignore the ones that are 'off'
-    if (variable_id == 1 && !event_page.conditions.variable_valid) {
-        return false;
+        // hacky check since RPGMaker's default id is '1'.
+        // so to prevent possible wrong results, we're going to ignore the ones that are 'off'
+        if (query_id == 1 && !event_page.conditions.variable_valid) {
+            return false;
+        }
+
+        result_info.active = event_page.conditions.variable_valid;
+
+    } else if (mode == ScrapeMode::SWITCHES) {
+        if (event_page.conditions.switch1_id != query_id &&
+            event_page.conditions.switch2_id != query_id) {
+            return false;
+        }
+
+        if (query_id == 1 &&
+            (!event_page.conditions.switch1_valid &&
+             !event_page.conditions.switch2_valid)) {
+            return false;
+        }
+
+        result_info.active = (event_page.conditions.switch1_valid || event_page.conditions.switch2_valid);
     }
 
     result_info.access_type = AccessType::READ;
-    result_info.active = event_page.conditions.variable_valid;
     result_info.formatted_action = format_event_page_condition(event_page.conditions);
 
     return true;
@@ -298,58 +426,68 @@ std::string RPGMakerScraper::format_command_if_statement(const std::vector<varia
         {5, "!="},
     };
 
-    const auto oper = std::get<uint32_t>(parameters[4]);
+    std::string if_statement = "If: ";
 
-    if (oper >= operator_strs.size()) {
-        log_warn("Operator was out of range!");
-        return "malformed operator";
+    if (mode == ScrapeMode::VARIABLES) {
+        const bool being_compared_against =
+            (std::get<uint32_t>(parameters[2]) == static_cast<uint32_t>(IfStatement::IDType::VARIABLE) &&
+             std::get<uint32_t>(parameters[3]) == query_id);
+
+        const auto oper = std::get<uint32_t>(parameters[4]);
+
+        if (oper >= operator_strs.size()) {
+            log_warn("Operator was out of range!");
+            return "malformed operator";
+        }
+
+        if (!being_compared_against) {
+            if_statement +=
+                utils::format_string("{%s} %s %d:", get_variable_name(query_id)->data(),
+                                     operator_strs.at(oper).data(), std::get<uint32_t>(parameters[3]));
+        } else {
+            if_statement +=
+                utils::format_string("{#%d} %s {%s}:", std::get<uint32_t>(parameters[1]),
+                                     operator_strs.at(oper).data(), get_variable_name(query_id)->data());
+        }
+    } else if (mode == ScrapeMode::SWITCHES) {
+        const auto switch_compared = std::get<uint32_t>(parameters[1]);
+        if_statement +=
+            utils::format_string("{%s} is %s", get_switch_name(switch_compared)->data(),
+                                 (std::get<uint32_t>(parameters[2]) ? "OFF" : "ON"));
+
     }
 
-    const bool being_compared_against =
-        (std::get<uint32_t>(parameters[2]) == static_cast<uint32_t>(IfStatement::IDType::VARIABLE) &&
-         std::get<uint32_t>(parameters[3]) == variable_id);
-
-    std::string if_statement = "IF ";
-
-    if (!being_compared_against) {
-        if_statement +=
-            utils::format_string("{%s} %s %d:", get_variable_name(variable_id)->data(),
-                                 operator_strs.at(oper).data(), std::get<uint32_t>(parameters[3]));
-    } else {
-        if_statement +=
-            utils::format_string("{#%d} %s {%s}:", std::get<uint32_t>(parameters[1]),
-                                 operator_strs.at(oper).data(), get_variable_name(variable_id)->data());
-    }
     return if_statement;
 }
 
 bool RPGMakerScraper::scrape_command_if_statement(ResultInformation &result_info, const Command &command) {
 
-    constexpr uint32_t expected_param_count = 5;
-
-    if (command.parameters.size() != expected_param_count) {
-        return false;
-    }
+    constexpr uint32_t expected_variable_param_count = 5;
+    constexpr uint32_t expected_switch_param_count = 3;
 
     const auto id_type = static_cast<IfStatement::IDType>(std::get<uint32_t>(command.parameters[0]));
     const auto id = std::get<uint32_t>(command.parameters[1]);
-    const auto compare_type = static_cast<IfStatement::CompareType>(std::get<uint32_t>(command.parameters[2]));
-    const auto compared_id = std::get<uint32_t>(command.parameters[3]);
 
     // check if we're in the right mode
-    if (mode == ScrapeMode::VARIABLES && id_type != IfStatement::IDType::VARIABLE) {
-        return false;
-    }
-    if (mode == ScrapeMode::SWITCHES && id_type != IfStatement::IDType::SWITCH) {
-        return false;
-    }
+    if (mode == ScrapeMode::VARIABLES) {
+        if (id_type != IfStatement::IDType::VARIABLE || command.parameters.size() != expected_variable_param_count) {
+            return false;
+        }
 
-    // check if our id is used
-    if (compare_type == IfStatement::CompareType::CONSTANT && id != variable_id) {
-        return false;
-    }
-    if (compare_type == IfStatement::CompareType::VARIABLE && (id != variable_id || compared_id != variable_id)) {
-        return false;
+        const auto compare_type = static_cast<IfStatement::CompareType>(std::get<uint32_t>(command.parameters[2]));
+        const auto compared_id = std::get<uint32_t>(command.parameters[3]);
+
+        // check if our id is used
+        if (compare_type == IfStatement::CompareType::CONSTANT && id != query_id) {
+            return false;
+        }
+        if (compare_type == IfStatement::CompareType::VARIABLE && (id != query_id || compared_id != query_id)) {
+            return false;
+        }
+    } else if (mode == ScrapeMode::SWITCHES) {
+        if (id_type != IfStatement::IDType::SWITCH || command.parameters.size() != expected_switch_param_count) {
+            return false;
+        }
     }
 
     result_info.access_type = AccessType::READ;
@@ -360,21 +498,25 @@ bool RPGMakerScraper::scrape_command_if_statement(ResultInformation &result_info
 }
 
 bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_info, const Command &command) {
+    if (mode != ScrapeMode::VARIABLES) {
+        return false;
+    }
 
     constexpr uint32_t expected_param_count_for_constant = 5;
     constexpr uint32_t expected_param_count_for_variable = 5;
     constexpr uint32_t expected_param_count_for_random = 6;
 
     const auto operand = static_cast<ControlVariable::Operand>(std::get<uint32_t>(command.parameters[3]));
+    const auto param_size = command.parameters.size();
 
     // verify operands match their parameter counts
-    if (operand == ControlVariable::Operand::CONSTANT && command.parameters.size() != expected_param_count_for_constant) {
+    if (operand == ControlVariable::Operand::CONSTANT && param_size != expected_param_count_for_constant) {
         return false;
     }
-    if (operand == ControlVariable::Operand::VARIABLE && command.parameters.size() != expected_param_count_for_variable) {
+    if (operand == ControlVariable::Operand::VARIABLE && param_size != expected_param_count_for_variable) {
         return false;
     }
-    if (operand == ControlVariable::Operand::RANDOM && command.parameters.size() != expected_param_count_for_random) {
+    if (operand == ControlVariable::Operand::RANDOM && param_size != expected_param_count_for_random) {
         return false;
     }
 
@@ -382,26 +524,17 @@ bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_
     const auto variable_id_end = std::get<uint32_t>(command.parameters[1]);
 
     const bool is_range = variable_id_start != variable_id_end;
+    // RPGMaker actually does query_id <= end to include the range
+    const bool is_within_range = query_id >= variable_id_start && query_id <= variable_id_end;
 
-    // check if this command is mutating our variable
-    if (operand == ControlVariable::Operand::CONSTANT && variable_id_start != variable_id) {
-        return false;
-    }
-    if (operand == ControlVariable::Operand::VARIABLE &&
-        (variable_id_start != variable_id && variable_id_end != variable_id)) {
-        return false;
-    }
-    if (operand == ControlVariable::Operand::RANDOM &&
-        (variable_id_start != variable_id) || (is_range && variable_id_end != variable_id)) {
-        return false;
-    }
+    // script access is determined if the value is present in the line of script
     if (operand == ControlVariable::Operand::SCRIPT) {
         const auto &script_line = std::get<std::string>(command.parameters[4]);
 
         return determine_access_from_script(result_info, script_line);
     }
+    // data doesn't pertain to variables or switches, so we don't care
     if (operand == ControlVariable::Operand::GAME_DATA) {
-        // data doesn't pertain to variables or switches, so we don't care
         return false;
     }
 
@@ -409,15 +542,22 @@ bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_
 
     // if we're setting a value to our variable
     if (operand == ControlVariable::Operand::CONSTANT || operand == ControlVariable::Operand::RANDOM) {
+        // make sure if we're dealing with the query_id
+        if ((!is_range && variable_id_start != query_id) || (is_range && !is_within_range)) {
+            return false;
+        }
         result_info.access_type = AccessType::WRITE;
     } else if (operand == ControlVariable::Operand::VARIABLE) {
         // if the thing we're setting another variable to is ours
-        if (std::get<uint32_t>(command.parameters[4]) == variable_id) {
-            result_info.access_type = AccessType::READ;
-        }
-        // if we're setting our variable to another variable in a range or not
-        else if (variable_id_start == variable_id || (is_range && variable_id_end == variable_id)) {
+        if (std::get<uint32_t>(command.parameters[4]) == query_id) {
+            // support weird commands that are reading and writing the same variable(s)..
+            result_info.access_type = is_within_range ? AccessType::READWRITE : AccessType::READ;
+        } else if (is_within_range) {
+            // if we're setting our variable to another variable in a range or not
             result_info.access_type = AccessType::WRITE;
+        } else {
+            // this doesn't deal with the query id at all
+            return false;
         }
     }
 
@@ -425,6 +565,53 @@ bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_
     result_info.formatted_action = format_command_control_variable(command.parameters);
 
     return true;
+}
+
+bool RPGMakerScraper::scrape_command_control_switch(ResultInformation &result_info, const Command &command) {
+    if (mode != ScrapeMode::SWITCHES) {
+        return false;
+    }
+
+    constexpr uint32_t expected_param_count = 3;
+
+    if (command.parameters.size() != expected_param_count) {
+        return false;
+    }
+
+    const auto switch_id_start = std::get<uint32_t>(command.parameters[0]);
+    const auto switch_id_end = std::get<uint32_t>(command.parameters[1]);
+
+    const bool is_range = switch_id_start != switch_id_end;
+    // RPGMaker actually does i <= end to include the range
+    const bool is_within_range = query_id >= switch_id_start && query_id <= switch_id_end;
+
+    if ((!is_range && switch_id_start != query_id) || (is_range && !is_within_range)) {
+        return false;
+    }
+
+    result_info.access_type = AccessType::WRITE;
+    result_info.active = true;
+    result_info.formatted_action = format_command_control_switch(command.parameters);
+
+    return true;
+}
+
+std::string RPGMakerScraper::format_command_control_switch(const std::vector<variable_element> &parameters) {
+
+    const auto switch_id_start = std::get<uint32_t>(parameters[0]);
+    const auto switch_id_end = std::get<uint32_t>(parameters[1]);
+
+    const auto is_range = switch_id_start != switch_id_end;
+
+    const auto setting_to_off = (std::get<uint32_t>(parameters[2]) ? true : false);
+
+    const auto var_prefix = is_range ?
+        utils::format_string("{%s} .. {%s}",
+                             get_switch_name(switch_id_start)->data(),
+                             get_switch_name(switch_id_end)->data()) :
+        utils::format_string("{%s}", get_switch_name(switch_id_start)->data());
+
+    return utils::format_string("%s = %s", var_prefix.data(), setting_to_off ? "OFF" : "ON");
 }
 
 std::string RPGMakerScraper::format_command_control_variable(const std::vector<variable_element> &parameters) {
@@ -450,7 +637,9 @@ std::string RPGMakerScraper::format_command_control_variable(const std::vector<v
     }
 
     const auto var_prefix = is_range ?
-        utils::format_string("{%s} .. {%s}", get_variable_name(variable_id_start)->data(), get_variable_name(variable_id_end)->data()) :
+        utils::format_string("{%s} .. {%s}",
+                             get_variable_name(variable_id_start)->data(),
+                             get_variable_name(variable_id_end)->data()) :
         utils::format_string("{%s}", get_variable_name(variable_id_start)->data());
 
     const auto operand = static_cast<ControlVariable::Operand>(std::get<uint32_t>(parameters[3]));
@@ -458,11 +647,14 @@ std::string RPGMakerScraper::format_command_control_variable(const std::vector<v
     if (operand == ControlVariable::Operand::VARIABLE) {
         const auto variable = std::get<uint32_t>(parameters[4]);
 
-        return utils::format_string("%s %s {%s}", var_prefix.data(), operation_strs.at(operation).data(), get_variable_name(variable)->data());
+        return utils::format_string("%s %s {%s}", var_prefix.data(),
+                                    operation_strs.at(operation).data(),
+                                    get_variable_name(variable)->data());
     } else if (operand == ControlVariable::Operand::CONSTANT) {
         const auto constant = std::get<uint32_t>(parameters[4]);
 
-        return utils::format_string("%s %s %d", var_prefix.data(), operation_strs.at(operation).data(), constant);
+        return utils::format_string("%s %s %d", var_prefix.data(),
+                                    operation_strs.at(operation).data(), constant);
     } else if (operand == ControlVariable::Operand::RANDOM) {
         const auto min = std::get<uint32_t>(parameters[4]);
         const auto max = std::get<uint32_t>(parameters[5]);
@@ -470,7 +662,7 @@ std::string RPGMakerScraper::format_command_control_variable(const std::vector<v
         return utils::format_string("%s = Random %d .. %d", var_prefix.data(), min, max);
     }
 
-    return "unsupported";
+    return unsupported;
 }
 
 bool RPGMakerScraper::scrape_command_script(ResultInformation &result_info, const Command &command) {
@@ -490,14 +682,14 @@ bool RPGMakerScraper::scrape_command_script(ResultInformation &result_info, cons
 
 bool RPGMakerScraper::determine_access_from_script(ResultInformation &result_info, std::string_view script_line) {
 
-    const std::string script_read_value = utils::format_string("$gameVariables.value(%d)", variable_id);
+    const std::string script_read_value = utils::format_string("$gameVariables.value(%d)", query_id);
     if (script_line.find(script_read_value) != std::string::npos) {
         result_info.access_type = AccessType::READ;
         result_info.active = true;
         result_info.formatted_action = script_line;
         return true;
     }
-    const std::string script_write_value = utils::format_string("$gameVariables.setValue(%d", variable_id);
+    const std::string script_write_value = utils::format_string("$gameVariables.setValue(%d", query_id);
     if (script_line.find(script_write_value) != std::string::npos) {
         result_info.access_type = AccessType::WRITE;
         result_info.active = true;
@@ -520,7 +712,7 @@ uint32_t RPGMakerScraper::calculate_instances() const {
 void RPGMakerScraper::print_results() {
 
     if (results.empty()) {
-        log_colored(logger::console_colors::RED, logger::console_colors::BLACK, "Couldn't locate maps using RPGMaker Variable #%03d", variable_id);
+        log_colored(logger::console_colors::RED, logger::console_colors::BLACK, "Couldn't locate maps using RPGMaker Variable #%03d", query_id);
         return;
     }
 
@@ -529,10 +721,10 @@ void RPGMakerScraper::print_results() {
     log_colored_nnl(colors::WHITE, colors::BLACK, "Found ");
     log_colored_nnl(colors::GREEN, colors::BLACK, "%d %s", results.size(), (results.size() > 1 ? "maps" : "map"));
     log_colored_nnl(colors::WHITE, colors::BLACK, " yielding ");
-    log_colored_nnl(colors::GREEN, colors::BLACK, "%d separate %s ", calculate_instances(), (calculate_instances() > 1 ? "instances" : "instance"));
+    log_colored(colors::GREEN, colors::BLACK, "%d separate %s ", calculate_instances(), (calculate_instances() > 1 ? "instances" : "instance"));
 
     if (mode == ScrapeMode::VARIABLES) {
-        log_colored(colors::WHITE, colors::BLACK, "using variable #%03d (\'%s\')", variable_id, variable_name.data());
+        log_colored(colors::WHITE, colors::BLACK, "using variable #%03d (\'%s\')", query_id, variable_name.data());
     }
 
     log_nopre("=========================================");
@@ -540,13 +732,18 @@ void RPGMakerScraper::print_results() {
     for (const auto &[map_id, hits] : results) {
         log_colored(colors::CYAN, colors::BLACK, "\n%s ('%s')", format_map_name(map_id).data(), get_map_name(map_id)->data());
         log_colored(colors::WHITE, colors::BLACK, "--------------------------------------------------\n");
+
         for (const auto &hit : hits) {
             const auto &event_info = hit.event_info;
 
             // group similar events cleanly
             static auto latest_event_id = event_info.id;
-            if (latest_event_id != event_info.id) {
+            static auto latest_event_page = hit.event_page;
+
+            const bool is_different = (latest_event_id != event_info.id);
+            if (is_different) {
                 latest_event_id = event_info.id;
+                latest_event_page = hit.event_page;
                 if (hit != *hits.begin()) {
                     log_nopre("\n");
                 }
@@ -554,17 +751,20 @@ void RPGMakerScraper::print_results() {
 
             log_colored_nnl((hit.active ? colors::DARK_GREEN : colors::DARK_GRAY), colors::BLACK, "%s",
                             (hit.active ? "ON" : "OFF"));
-            log_colored((hit.access_type == AccessType::READ ? colors::BLUE : colors::RED), colors::BLACK, " [%s]", (hit.access_type == AccessType::READ ? "READ" : "WRITE"));
+            const auto access_info = get_access_info(hit.access_type);
+            log_colored_nnl(access_info.second, colors::BLACK, " [%s]", access_info.first.data());
 
             log_nopre("\t@ [%d, %d] on Event #%03d ('%s') on Event Page #%02d:", event_info.x, event_info.y,
                       event_info.id, event_info.name.data(), hit.event_page);
 
+            // log line number | reference
             if (hit.line_number) {
-                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\tLine %03d", *hit.line_number);
-                log_colored(colors::WHITE, colors::BLACK, " | %s", hit.formatted_action.data());
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine %03d", *hit.line_number);
             } else {
-                log_colored(colors::WHITE, colors::BLACK, "\t\t%s", hit.formatted_action.data());
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine N/A", *hit.line_number);
             }
+
+            log_colored(colors::WHITE, colors::BLACK, " | %s", hit.formatted_action.data());
         }
     }
 
@@ -583,7 +783,7 @@ std::ostream &operator<<(std::ostream &os, const RPGMakerScraper &scraper) {
         utils::format_string("yielding %d %s ", scraper.calculate_instances(), (scraper.calculate_instances() > 1 ? "instances" : "instance")).data();
 
     if (scraper.mode == ScrapeMode::VARIABLES) {
-        os << utils::format_string("using variable #%03d (\'%s\')", scraper.variable_id, scraper.variable_name.data()).data();
+        os << utils::format_string("using variable #%03d (\'%s\')", scraper.query_id, scraper.variable_name.data()).data();
     }
 
     os << std::endl << "=========================================" << std::endl;
@@ -604,8 +804,9 @@ std::ostream &operator<<(std::ostream &os, const RPGMakerScraper &scraper) {
                 }
             }
 
+            const auto access_info = get_access_info(hit.access_type);
             os << utils::format_string("%s", (hit.active ? "ON" : "OFF")).data() <<
-                utils::format_string(" [%s]", (hit.access_type == AccessType::READ ? "READ" : "WRITE")) << std::endl;
+                utils::format_string(" [%s]", access_info.first.data()) << std::endl;
 
             os << utils::format_string("\t@ [%d, %d] on Event #%03d (\'%s\') on Event Page #%02d:", event_info.x, event_info.y,
                                        event_info.id, event_info.name.data(), hit.event_page) << std::endl;
