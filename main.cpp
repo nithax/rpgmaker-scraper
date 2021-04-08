@@ -5,11 +5,17 @@
 
 using colors = logger::console_colors;
 
+bool string_ends_with(std::string str, std::string suffix) {
+    return str.size() >= suffix.size() &&
+        str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 void print_usage() {
     log_colored(colors::RED, colors::BLACK,
                 "incorrect usage - please use the program like so:\n"
                 "RPGMakerScraper -v 143 test_output.txt\n"
-                "RPGMakerScraper -s 21");
+                "RPGMakerScraper -s 21\n"
+                "RPGMakerScraper -s 714 test_output.json");
 }
 
 int main(int argc, const char *argv[]) {
@@ -18,6 +24,7 @@ int main(int argc, const char *argv[]) {
 
     constexpr const char *search_type_variables = "-v";
     constexpr const char *search_type_switches = "-s";
+    constexpr const char *as_json = ".json";
 
     // check the argument count
     if (argc < expected_minimum_argc) {
@@ -74,19 +81,27 @@ int main(int argc, const char *argv[]) {
                     throw std::invalid_argument(R"(unable to create output file)");
                 }
 
-                file << scraper;
-                file.close();
+                if (string_ends_with(file_name, as_json)) {
+
+                    log_info(R"(writing results as json..)");
+
+                    if (scraper->output_json()) {
+                        file << *scraper->output_json();
+                    }
+                } else {
+                    file << scraper;
+                    file.close();
+                }
 
                 log_ok(R"(results wrote successfully.)");
             }
         }
-
     } catch (const std::exception &e) {
         log_err(R"(exception caught: %s)", e.what());
     }
 
     log_nopre("\n");
-    log_ok(R"(press any key to close the program...)");
+    log_ok(R"(press enter to close the program...)");
 
     std::cin.get();
     return 0;

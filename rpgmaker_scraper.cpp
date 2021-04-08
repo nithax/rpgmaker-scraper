@@ -9,8 +9,8 @@
 
 // lazy debug, set an id to UINT_MAX if you want to ignore it
 static constexpr bool is_debugging = false;
-static constexpr uint32_t debug_map_id = 999;
-static constexpr uint32_t debug_event_id = 1;
+static constexpr uint32_t debug_map_id = UINT_MAX;
+static constexpr uint32_t debug_event_id = UINT_MAX;
 
 using colors = logger::console_colors;
 using access_color = std::pair<std::string, colors>;
@@ -72,6 +72,15 @@ std::optional<std::string> RPGMakerScraper::get_switch_name(uint32_t id) const {
     return name;
 }
 
+std::optional<std::string> RPGMakerScraper::get_common_event_name(uint32_t id) const {
+
+    if (id == 0 || common_event_names.empty() || common_event_names.find(id) == common_event_names.end()) {
+        return std::nullopt;
+    }
+
+    return common_event_names.at(id);
+}
+
 void RPGMakerScraper::load() {
 
     log_info(R"(verifying we're in the proper path...)");
@@ -120,6 +129,10 @@ void RPGMakerScraper::load() {
     log_info(R"(scraping maps...)");
 
     scrape_maps();
+
+    log_info(R"(scraping common events...)");
+
+    scrape_common_events();
 }
 
 void RPGMakerScraper::scrape_maps() {
@@ -177,6 +190,41 @@ void RPGMakerScraper::scrape_maps() {
     }
 }
 
+bool RPGMakerScraper::scrape_common_events() {
+
+    constexpr const char *common_events_file_str = "CommonEvents.json";
+    const std::filesystem::path common_events_path = root_data_path / common_events_file_str;
+
+    if (!std::filesystem::exists(common_events_path)) {
+        log_err(R"(CommonEvents.json doesn't exist inside data/. Please make sure you're in the proper folder.)");
+        return false;
+    }
+
+    std::ifstream common_events_file(common_events_path);
+    if (!common_events_file.is_open() || !common_events_file.good()) {
+        log_err(R"(Unable to open the CommonEvents file.)");
+        return false;
+    }
+
+    json common_events_json;
+    common_events_file >> common_events_json;
+    common_events_file.close();
+
+    for (const auto &common_event : common_events_json) {
+        if (common_event.empty()) {
+            continue;
+        }
+
+        all_common_events.emplace_back(CommonEvent(common_event));
+
+        // grab the common event names in one shot
+        auto &back = all_common_events.back();
+        common_event_names[back.id] = back.name;
+    }
+
+    return true;
+}
+
 void RPGMakerScraper::scrape() {
 
     // go over every map
@@ -191,11 +239,13 @@ void RPGMakerScraper::scrape() {
             for (size_t page_num = 0, page_count = event.pages.size(); page_num < page_count; ++page_num) {
                 const auto &page = event.pages[page_num];
 
-                ResultInformation result_info{};
-                result_info.event_page = static_cast<uint32_t>(page_num) + 1;
-                result_info.event_info = event;
+                std::shared_ptr<MapEventResult> result_info = std::make_shared<MapEventResult>();
+                result_info->event_page = static_cast<uint32_t>(page_num) + 1;
+                result_info->event_info = event;
 
-                if (scrape_event_page_condition(result_info, page)) {
+                auto downcasted_result_info = std::dynamic_pointer_cast<ResultInformationBase>(result_info);
+
+                if (scrape_event_page_condition(downcasted_result_info, page)) {
                     results[map_id].push_back(result_info);
                 }
 
@@ -204,36 +254,94 @@ void RPGMakerScraper::scrape() {
                     const auto &line = page.list[line_num];
 
                     if (line.is_if_statement()) {
-                        if (scrape_command_if_statement(result_info, line)) {
-                            result_info.line_number = static_cast<uint32_t>(line_num) + 1;
+                        if (scrape_command_if_statement(downcasted_result_info, line)) {
+                            result_info->line_number = static_cast<uint32_t>(line_num) + 1;
                             results[map_id].push_back(result_info);
                             continue;
                         }
                     }
 
                     if (line.is_control_variable()) {
-                        if (scrape_command_control_variable(result_info, line)) {
-                            result_info.line_number = static_cast<uint32_t>(line_num) + 1;
+                        if (scrape_command_control_variable(downcasted_result_info, line)) {
+                            result_info->line_number = static_cast<uint32_t>(line_num) + 1;
                             results[map_id].push_back(result_info);
                             continue;
                         }
                     }
 
                     if (line.is_control_switch()) {
-                        if (scrape_command_control_switch(result_info, line)) {
-                            result_info.line_number = static_cast<uint32_t>(line_num) + 1;
+                        if (scrape_command_control_switch(downcasted_result_info, line)) {
+                            result_info->line_number = static_cast<uint32_t>(line_num) + 1;
                             results[map_id].push_back(result_info);
                             continue;
                         }
                     }
 
                     if (line.is_script()) {
-                        if (scrape_command_script(result_info, line)) {
-                            result_info.line_number = static_cast<uint32_t>(line_num) + 1;
+                        if (scrape_command_script(downcasted_result_info, line)) {
+                            result_info->line_number = static_cast<uint32_t>(line_num) + 1;
                             results[map_id].push_back(result_info);
                             continue;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    const bool check_for_switches = mode == ScrapeMode::SWITCHES;
+    // go over every common event
+    for (const auto &common_event : all_common_events) {
+
+        // check for switches
+        if (check_for_switches && common_event.has_trigger()) {
+            auto result_info = std::make_shared<ResultInformationBase>();
+
+            if (scrape_common_event_trigger(result_info, common_event)) {
+                result_info->name = common_event.name;
+                common_event_results[common_event.id].push_back(result_info);
+            }
+        }
+
+        auto &command_list = common_event.list;
+        for (size_t line_num = 0, line_count = command_list.size(); line_num < line_count; ++line_num) {
+            const auto &line = command_list[line_num];
+
+            auto result_info = std::make_shared<ResultInformationBase>();
+
+            if (line.is_if_statement()) {
+                if (scrape_command_if_statement(result_info, line)) {
+                    result_info->line_number = static_cast<uint32_t>(line_num) + 1;
+                    result_info->name = common_event.name;
+                    common_event_results[common_event.id].push_back(result_info);
+                    continue;
+                }
+            }
+
+            if (line.is_control_variable()) {
+                if (scrape_command_control_variable(result_info, line)) {
+                    result_info->line_number = static_cast<uint32_t>(line_num) + 1;
+                    result_info->name = common_event.name;
+                    common_event_results[common_event.id].push_back(result_info);
+                    continue;
+                }
+            }
+
+            if (line.is_control_switch()) {
+                if (scrape_command_control_switch(result_info, line)) {
+                    result_info->line_number = static_cast<uint32_t>(line_num) + 1;
+                    result_info->name = common_event.name;
+                    common_event_results[common_event.id].push_back(result_info);
+                    continue;
+                }
+            }
+
+            if (line.is_script()) {
+                if (scrape_command_script(result_info, line)) {
+                    result_info->line_number = static_cast<uint32_t>(line_num) + 1;
+                    result_info->name = common_event.name;
+                    common_event_results[common_event.id].push_back(result_info);
+                    continue;
                 }
             }
         }
@@ -267,7 +375,7 @@ bool RPGMakerScraper::populate_map_names() {
     }
 
     std::ifstream mapInfos_file(map_infos_path);
-    if (mapInfos_file.bad()) {
+    if (!mapInfos_file.is_open() || !mapInfos_file.good()) {
         log_err(R"(Unable to open the mapinfos file.)");
         return false;
     }
@@ -304,7 +412,7 @@ bool RPGMakerScraper::populate_names() {
     }
 
     std::ifstream system_file(system_file_path);
-    if (system_file.bad()) {
+    if (!system_file.is_open() || !system_file.good()) {
         log_err(R"(Unable to open the System file.)");
         return false;
     }
@@ -347,6 +455,10 @@ bool RPGMakerScraper::populate_names() {
     return true;
 }
 
+bool RPGMakerScraper::has_results() const {
+    return !results.empty() || !common_event_results.empty();
+}
+
 std::string RPGMakerScraper::format_map_name(uint32_t id) const {
 
     return utils::format_string("Map%03d.json", id);
@@ -368,8 +480,7 @@ std::string RPGMakerScraper::format_event_page_condition(const Condition &condit
                                          get_switch_name(condition.switch1_id)->data()));
         } else if (condition.switch1_valid) {
             ret += utils::format_string("{%s}", get_switch_name(condition.switch1_id)->data());
-        }
-        else if (condition.switch2_valid) {
+        } else if (condition.switch2_valid) {
             ret += utils::format_string("{%s}", get_switch_name(condition.switch2_id)->data());
         }
         ret += ":";
@@ -379,7 +490,7 @@ std::string RPGMakerScraper::format_event_page_condition(const Condition &condit
     return unsupported;
 }
 
-bool RPGMakerScraper::scrape_event_page_condition(ResultInformation &result_info, const EventPage &event_page) {
+bool RPGMakerScraper::scrape_event_page_condition(std::shared_ptr<ResultInformationBase> result_info, const EventPage &event_page) {
 
     if (mode == ScrapeMode::VARIABLES) {
         if (event_page.conditions.variable_id != query_id) {
@@ -392,7 +503,7 @@ bool RPGMakerScraper::scrape_event_page_condition(ResultInformation &result_info
             return false;
         }
 
-        result_info.active = event_page.conditions.variable_valid;
+        result_info->active = event_page.conditions.variable_valid;
 
     } else if (mode == ScrapeMode::SWITCHES) {
         if (event_page.conditions.switch1_id != query_id &&
@@ -406,11 +517,11 @@ bool RPGMakerScraper::scrape_event_page_condition(ResultInformation &result_info
             return false;
         }
 
-        result_info.active = (event_page.conditions.switch1_valid || event_page.conditions.switch2_valid);
+        result_info->active = (event_page.conditions.switch1_valid || event_page.conditions.switch2_valid);
     }
 
-    result_info.access_type = AccessType::READ;
-    result_info.formatted_action = format_event_page_condition(event_page.conditions);
+    result_info->access_type = AccessType::READ;
+    result_info->formatted_action = format_event_page_condition(event_page.conditions);
 
     return true;
 }
@@ -460,22 +571,33 @@ std::string RPGMakerScraper::format_command_if_statement(const std::vector<varia
     return if_statement;
 }
 
-bool RPGMakerScraper::scrape_command_if_statement(ResultInformation &result_info, const Command &command) {
+bool RPGMakerScraper::scrape_command_if_statement(std::shared_ptr<ResultInformationBase> result_info, const Command &command) {
 
     constexpr uint32_t expected_variable_param_count = 5;
     constexpr uint32_t expected_switch_param_count = 3;
+    constexpr uint32_t expected_script_param_count = 2;
+
+    const auto param_count = command.parameters.size();
 
     const auto id_type = static_cast<IfStatement::IDType>(std::get<uint32_t>(command.parameters[0]));
-    const auto id = std::get<uint32_t>(command.parameters[1]);
+
+    if (id_type == IfStatement::IDType::SCRIPT) {
+        if (param_count != expected_script_param_count) {
+            return false;
+        }
+
+        return determine_access_from_script(result_info, std::get<std::string>(command.parameters[1]));
+    }
 
     // check if we're in the right mode
     if (mode == ScrapeMode::VARIABLES) {
-        if (id_type != IfStatement::IDType::VARIABLE || command.parameters.size() != expected_variable_param_count) {
+        if (id_type != IfStatement::IDType::VARIABLE || param_count != expected_variable_param_count) {
             return false;
         }
 
         const auto compare_type = static_cast<IfStatement::CompareType>(std::get<uint32_t>(command.parameters[2]));
         const auto compared_id = std::get<uint32_t>(command.parameters[3]);
+        const auto id = std::get<uint32_t>(command.parameters[1]);
 
         // check if our id is used
         if (compare_type == IfStatement::CompareType::CONSTANT && id != query_id) {
@@ -485,19 +607,25 @@ bool RPGMakerScraper::scrape_command_if_statement(ResultInformation &result_info
             return false;
         }
     } else if (mode == ScrapeMode::SWITCHES) {
-        if (id_type != IfStatement::IDType::SWITCH || command.parameters.size() != expected_switch_param_count) {
+        if (id_type != IfStatement::IDType::SWITCH || param_count != expected_switch_param_count) {
+            return false;
+        }
+
+        const auto id = std::get<uint32_t>(command.parameters[1]);
+
+        if (id != query_id) {
             return false;
         }
     }
 
-    result_info.access_type = AccessType::READ;
-    result_info.active = true;
-    result_info.formatted_action = format_command_if_statement(command.parameters);
+    result_info->access_type = AccessType::READ;
+    result_info->active = true;
+    result_info->formatted_action = format_command_if_statement(command.parameters);
 
     return true;
 }
 
-bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_info, const Command &command) {
+bool RPGMakerScraper::scrape_command_control_variable(std::shared_ptr<ResultInformationBase> result_info, const Command &command) {
     if (mode != ScrapeMode::VARIABLES) {
         return false;
     }
@@ -546,28 +674,28 @@ bool RPGMakerScraper::scrape_command_control_variable(ResultInformation &result_
         if ((!is_range && variable_id_start != query_id) || (is_range && !is_within_range)) {
             return false;
         }
-        result_info.access_type = AccessType::WRITE;
+        result_info->access_type = AccessType::WRITE;
     } else if (operand == ControlVariable::Operand::VARIABLE) {
         // if the thing we're setting another variable to is ours
         if (std::get<uint32_t>(command.parameters[4]) == query_id) {
             // support weird commands that are reading and writing the same variable(s)..
-            result_info.access_type = is_within_range ? AccessType::READWRITE : AccessType::READ;
+            result_info->access_type = is_within_range ? AccessType::READWRITE : AccessType::READ;
         } else if (is_within_range) {
             // if we're setting our variable to another variable in a range or not
-            result_info.access_type = AccessType::WRITE;
+            result_info->access_type = AccessType::WRITE;
         } else {
             // this doesn't deal with the query id at all
             return false;
         }
     }
 
-    result_info.active = true;
-    result_info.formatted_action = format_command_control_variable(command.parameters);
+    result_info->active = true;
+    result_info->formatted_action = format_command_control_variable(command.parameters);
 
     return true;
 }
 
-bool RPGMakerScraper::scrape_command_control_switch(ResultInformation &result_info, const Command &command) {
+bool RPGMakerScraper::scrape_command_control_switch(std::shared_ptr<ResultInformationBase> result_info, const Command &command) {
     if (mode != ScrapeMode::SWITCHES) {
         return false;
     }
@@ -589,9 +717,9 @@ bool RPGMakerScraper::scrape_command_control_switch(ResultInformation &result_in
         return false;
     }
 
-    result_info.access_type = AccessType::WRITE;
-    result_info.active = true;
-    result_info.formatted_action = format_command_control_switch(command.parameters);
+    result_info->access_type = AccessType::WRITE;
+    result_info->active = true;
+    result_info->formatted_action = format_command_control_switch(command.parameters);
 
     return true;
 }
@@ -665,7 +793,7 @@ std::string RPGMakerScraper::format_command_control_variable(const std::vector<v
     return unsupported;
 }
 
-bool RPGMakerScraper::scrape_command_script(ResultInformation &result_info, const Command &command) {
+bool RPGMakerScraper::scrape_command_script(std::shared_ptr<ResultInformationBase> result_info, const Command &command) {
 
     constexpr uint32_t expected_param_count = 1;
 
@@ -680,21 +808,55 @@ bool RPGMakerScraper::scrape_command_script(ResultInformation &result_info, cons
     return determine_access_from_script(result_info, std::get<std::string>(command.parameters[0]));
 }
 
-bool RPGMakerScraper::determine_access_from_script(ResultInformation &result_info, std::string_view script_line) {
+std::string RPGMakerScraper::format_common_event_trigger(const CommonEvent &common_event) {
+    return utils::format_string("HAS TRIGGER: (%s)", (common_event.trigger == CommonEventTrigger::AUTORUN ? "AUTORUN" : "PARALLEL"));
+}
 
-    const std::string script_read_value = utils::format_string("$gameVariables.value(%d)", query_id);
-    if (script_line.find(script_read_value) != std::string::npos) {
-        result_info.access_type = AccessType::READ;
-        result_info.active = true;
-        result_info.formatted_action = script_line;
-        return true;
+bool RPGMakerScraper::scrape_common_event_trigger(std::shared_ptr<ResultInformationBase> result_info, const CommonEvent &common_event) {
+
+    if (common_event.switch_id != query_id) {
+        return false;
     }
-    const std::string script_write_value = utils::format_string("$gameVariables.setValue(%d", query_id);
-    if (script_line.find(script_write_value) != std::string::npos) {
-        result_info.access_type = AccessType::WRITE;
-        result_info.active = true;
-        result_info.formatted_action = script_line;
-        return true;
+
+    result_info->access_type = AccessType::READ;
+    result_info->active = true;
+    result_info->formatted_action = format_common_event_trigger(common_event);
+
+    return true;
+}
+
+bool RPGMakerScraper::determine_access_from_script(std::shared_ptr<ResultInformationBase> result_info, std::string_view script_line) {
+
+    if (mode == ScrapeMode::VARIABLES) {
+        const std::string script_read_variable = utils::format_string("$gameVariables.value(%d)", query_id);
+        if (script_line.find(script_read_variable) != std::string::npos) {
+            result_info->access_type = AccessType::READ;
+            result_info->active = true;
+            result_info->formatted_action = script_line;
+            return true;
+        }
+        const std::string script_write_variable = utils::format_string("$gameVariables.setValue(%d", query_id);
+        if (script_line.find(script_write_variable) != std::string::npos) {
+            result_info->access_type = AccessType::WRITE;
+            result_info->active = true;
+            result_info->formatted_action = script_line;
+            return true;
+        }
+    } else if (mode == ScrapeMode::SWITCHES) {
+        const std::string script_read_switch = utils::format_string("$gameSwitches.value(%d)", query_id);
+        if (script_line.find(script_read_switch) != std::string::npos) {
+            result_info->access_type = AccessType::READ;
+            result_info->active = true;
+            result_info->formatted_action = script_line;
+            return true;
+        }
+        const std::string script_write_switch = utils::format_string("$gameSwitches.setValue(%d", query_id);
+        if (script_line.find(script_write_switch) != std::string::npos) {
+            result_info->access_type = AccessType::WRITE;
+            result_info->active = true;
+            result_info->formatted_action = script_line;
+            return true;
+        }
     }
 
     return false;
@@ -706,12 +868,15 @@ uint32_t RPGMakerScraper::calculate_instances() const {
     for (const auto &pair : results) {
         count += static_cast<uint32_t>(pair.second.size());
     }
+    for (const auto &pair : common_event_results) {
+        count += static_cast<uint32_t>(pair.second.size());
+    }
     return count;
 }
 
 void RPGMakerScraper::print_results() {
 
-    if (results.empty()) {
+    if (!has_results()) {
         log_colored(logger::console_colors::RED, logger::console_colors::BLACK, "Couldn't locate maps using RPGMaker Variable #%03d", query_id);
         return;
     }
@@ -720,11 +885,18 @@ void RPGMakerScraper::print_results() {
 
     log_colored_nnl(colors::WHITE, colors::BLACK, "Found ");
     log_colored_nnl(colors::GREEN, colors::BLACK, "%d %s", results.size(), (results.size() > 1 ? "maps" : "map"));
+    if (!common_event_results.empty()) {
+        log_colored_nnl(colors::WHITE, colors::BLACK, " and ");
+        log_colored_nnl(colors::GREEN, colors::BLACK, "%d %s", common_event_results.size(), 
+                        (common_event_results.size() > 1 ? "common events" : "common event"));
+    }
     log_colored_nnl(colors::WHITE, colors::BLACK, " yielding ");
-    log_colored(colors::GREEN, colors::BLACK, "%d separate %s ", calculate_instances(), (calculate_instances() > 1 ? "instances" : "instance"));
+    log_colored(colors::GREEN, colors::BLACK, "%d total %s ", calculate_instances(), (calculate_instances() > 1 ? "instances" : "instance"));
 
     if (mode == ScrapeMode::VARIABLES) {
         log_colored(colors::WHITE, colors::BLACK, "using variable #%03d (\'%s\')", query_id, variable_name.data());
+    } else if (mode == ScrapeMode::SWITCHES) {
+        log_colored(colors::WHITE, colors::BLACK, "using switch #%03d (\'%s\')", query_id, switch_name.data());
     }
 
     log_nopre("=========================================");
@@ -734,66 +906,111 @@ void RPGMakerScraper::print_results() {
         log_colored(colors::WHITE, colors::BLACK, "--------------------------------------------------\n");
 
         for (const auto &hit : hits) {
-            const auto &event_info = hit.event_info;
+            const auto &event_info = hit->event_info;
 
             // group similar events cleanly
             static auto latest_event_id = event_info.id;
-            static auto latest_event_page = hit.event_page;
+            static auto latest_event_page = hit->event_page;
 
             const bool is_different = (latest_event_id != event_info.id);
             if (is_different) {
                 latest_event_id = event_info.id;
-                latest_event_page = hit.event_page;
+                latest_event_page = hit->event_page;
                 if (hit != *hits.begin()) {
                     log_nopre("\n");
                 }
             }
 
-            log_colored_nnl((hit.active ? colors::DARK_GREEN : colors::DARK_GRAY), colors::BLACK, "%s",
-                            (hit.active ? "ON" : "OFF"));
-            const auto access_info = get_access_info(hit.access_type);
+            log_colored_nnl((hit->active ? colors::DARK_GREEN : colors::DARK_GRAY), colors::BLACK, "%s",
+                            (hit->active ? "ON" : "OFF"));
+            const auto access_info = get_access_info(hit->access_type);
             log_colored_nnl(access_info.second, colors::BLACK, " [%s]", access_info.first.data());
 
             log_nopre("\t@ [%d, %d] on Event #%03d ('%s') on Event Page #%02d:", event_info.x, event_info.y,
-                      event_info.id, event_info.name.data(), hit.event_page);
+                      event_info.id, event_info.name.data(), hit->event_page);
 
             // log line number | reference
-            if (hit.line_number) {
-                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine %03d", *hit.line_number);
+            if (hit->line_number) {
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine %03d", *hit->line_number);
             } else {
-                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine N/A", *hit.line_number);
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\t\tLine N/A");
             }
 
-            log_colored(colors::WHITE, colors::BLACK, " | %s", hit.formatted_action.data());
+            log_colored(colors::WHITE, colors::BLACK, " | %s", hit->formatted_action.data());
         }
     }
 
-    log_nopre("=========================================");
+    if (!common_event_results.empty()) {
+        log_nopre("\n\n");
+    }
+
+    for (const auto &[event_id, common_events] : common_event_results) {
+        log_colored(colors::CYAN, colors::BLACK, "\n%s", get_common_event_name(event_id)->data());
+        log_colored(colors::WHITE, colors::BLACK, "--------------------------------------------------\n");
+
+        for (const auto &common_event : common_events) {
+
+            // group similar common events evenly
+            static auto &latest_event_name = common_event->name;
+            const bool is_different = (latest_event_name != common_event->name);
+            if (is_different) {
+                latest_event_name = common_event->name;
+                if (common_event != *common_events.begin()) {
+                    log_nopre("\n");
+                }
+            }
+
+            log_colored_nnl((common_event->active ? colors::DARK_GREEN : colors::DARK_GRAY), colors::BLACK, "%s",
+                            (common_event->active ? "ON" : "OFF"));
+            const auto access_info = get_access_info(common_event->access_type);
+            log_colored_nnl(access_info.second, colors::BLACK, " [%s]", access_info.first.data());
+
+            // log line number | reference
+            if (common_event->line_number) {
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\tLine %03d", *common_event->line_number);
+            } else {
+                log_colored_nnl(colors::DARK_GRAY, colors::BLACK, "\t\tLine N/A");
+            }
+
+            log_colored(colors::WHITE, colors::BLACK, " | %s", common_event->formatted_action.data());
+        }
+    }
+
+    log_nopre("\n=========================================");
 }
 
 std::ostream &operator<<(std::ostream &os, const RPGMakerScraper &scraper) {
 
-    if (scraper.results.empty()) {
+    if (!scraper.has_results()) {
         return os;
     }
 
-    os << "=========================================" << std::endl;
+    os << "=========================================" << "\n";
 
-    os << utils::format_string("Found %d %s ", scraper.results.size(), (scraper.results.size() > 1 ? "maps" : "map")).data() <<
-        utils::format_string("yielding %d %s ", scraper.calculate_instances(), (scraper.calculate_instances() > 1 ? "instances" : "instance")).data();
+    os << utils::format_string("Found %d %s ", scraper.results.size(), (scraper.results.size() > 1 ? "maps" : "map")).data();
+    
+    if (!scraper.common_event_results.empty()) {
+        os << utils::format_string(" and %d %s ", 
+                                   scraper.common_event_results.size(), 
+                                   (scraper.common_event_results.size() > 1 ? "common events" : "common event")).data();
+    }
+
+    os << utils::format_string("yielding %d total %s ", scraper.calculate_instances(), (scraper.calculate_instances() > 1 ? "instances" : "instance")).data();
 
     if (scraper.mode == ScrapeMode::VARIABLES) {
         os << utils::format_string("using variable #%03d (\'%s\')", scraper.query_id, scraper.variable_name.data()).data();
+    } else if (scraper.mode == ScrapeMode::SWITCHES) {
+        os << utils::format_string("using switch #%03d (\'%s\')", scraper.query_id, scraper.switch_name.data()).data();
     }
 
     os << std::endl << "=========================================" << std::endl;
 
     for (const auto &[map_id, hits] : scraper.results) {
-        os << std::endl;
-        os << utils::format_string("%s (\'%s\')", scraper.format_map_name(map_id).data(), scraper.get_map_name(map_id)->data()) << std::endl;
-        os << "--------------------------------------------------" << std::endl;
+        os << "\n";
+        os << utils::format_string("%s (\'%s\')", scraper.format_map_name(map_id).data(), scraper.get_map_name(map_id)->data()) << "\n";
+        os << "--------------------------------------------------" << "\n";
         for (const auto &hit : hits) {
-            const auto &event_info = hit.event_info;
+            const auto &event_info = hit->event_info;
 
             // group similar events cleanly
             static auto latest_event_id = event_info.id;
@@ -804,22 +1021,105 @@ std::ostream &operator<<(std::ostream &os, const RPGMakerScraper &scraper) {
                 }
             }
 
-            const auto access_info = get_access_info(hit.access_type);
-            os << utils::format_string("%s", (hit.active ? "ON" : "OFF")).data() <<
-                utils::format_string(" [%s]", access_info.first.data()) << std::endl;
+            const auto access_info = get_access_info(hit->access_type);
+            os << utils::format_string("%s", (hit->active ? "ON" : "OFF")).data() <<
+                utils::format_string(" [%s]", access_info.first.data()) << "\n";
 
             os << utils::format_string("\t@ [%d, %d] on Event #%03d (\'%s\') on Event Page #%02d:", event_info.x, event_info.y,
-                                       event_info.id, event_info.name.data(), hit.event_page) << std::endl;
+                                       event_info.id, event_info.name.data(), hit->event_page) << "\n";
 
-            if (hit.line_number) {
-                os << utils::format_string("\t\tLine %03d | %s", *hit.line_number, hit.formatted_action.data()) << std::endl;
+            if (hit->line_number) {
+                os << utils::format_string("\t\tLine %03d | %s", *hit->line_number, hit->formatted_action.data()) << "\n";
             } else {
-                os << "\t\t" << hit.formatted_action.data() << std::endl;
+                os << "\t\t" << hit->formatted_action.data() << "\n";
             }
         }
     }
 
-    os << "=========================================" << std::endl;
+    if (!scraper.common_event_results.empty()) {
+        os << "\n\n";
+    }
+
+    for (const auto &[event_id, common_events] : scraper.common_event_results) {
+        os << scraper.get_common_event_name(event_id)->data() << "\n";
+        os << "--------------------------------------------------\n";
+
+        for (const auto &common_event : common_events) {
+
+            // group similar common events evenly
+            static auto &latest_event_name = common_event->name;
+            const bool is_different = (latest_event_name != common_event->name);
+            if (is_different) {
+                latest_event_name = common_event->name;
+                if (common_event != *common_events.begin()) {
+                    log_nopre("\n");
+                }
+            }
+
+            const auto access_info = get_access_info(common_event->access_type);
+            os << utils::format_string("%s", (common_event->active ? "ON" : "OFF")).data() <<
+                utils::format_string(" [%s]", access_info.first.data());
+
+            // log line number | reference
+            if (common_event->line_number) {
+                os << utils::format_string("\t\tLine %03d | %s", *common_event->line_number, common_event->formatted_action.data()) << "\n";
+            } else {
+                os << "\t\t" << common_event->formatted_action.data() << "\n";
+            }
+        }
+    }
+
+    os << "=========================================" << "\n";
 
     return os;
+}
+
+std::optional<std::string> RPGMakerScraper::output_json() {
+    if (!has_results()) {
+        return std::nullopt;
+    }
+
+    json _json;
+
+    // output map events under 'map_events'
+    for (const auto &[map_id, events] : results) {
+        for (const auto &event : events) {
+            json event_json = {
+                {"access_type", static_cast<uint32_t>(event->access_type)},
+                {"active", event->active},
+                {"event_page", event->event_page},
+                {"formatted_action", event->formatted_action},
+                {"id", event->event_info.id},
+                {"name", event->event_info.name},
+                {"note", event->event_info.note},
+                {"x", event->event_info.x},
+                {"y", event->event_info.y},
+            };
+
+            if (event->line_number) {
+                event_json["line_number"] = *event->line_number;
+            }
+
+            _json["maps"][std::to_string(map_id)].push_back(event_json);
+        }
+    }
+    // output common event results under 'common_events'
+    for (const auto &[common_event_id, common_events] : common_event_results) {
+        for (const auto &common_event : common_events) {
+            json common_event_json = {
+                {"access_type", static_cast<uint32_t>(common_event->access_type)},
+                {"active", common_event->active},
+                {"formatted_action", common_event->formatted_action},
+                {"name", common_event->name}
+            };
+
+            if (common_event->line_number) {
+                common_event_json["line_number"] = *common_event->line_number;
+            }
+
+            _json["common_events"][std::to_string(common_event_id)].push_back(common_event_json);
+        }
+    }
+
+    return _json.dump();
 }

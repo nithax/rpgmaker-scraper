@@ -14,7 +14,10 @@ list references to variable id '24' and store the results in 'var_24.txt'
 > `RPGMakerScraper -v 24 var_24.txt`
 
 list references to switch id '27'
-> `RPGMakerScaper -s 27`
+> `RPGMakerScraper -s 27`
+
+list references to variable id '79' and output as .json
+> `RPGMakerScraper -v 79 var_79.json`
 
 it's that easy.
 

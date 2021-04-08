@@ -139,6 +139,10 @@ bool Event::is_valid(const json &event_json) const {
         log_err(R"(Event doesn't have a name or it's not a string!)");
         return false;
     }
+    if (!event_json.contains("note") || !event_json["note"].is_string()) {
+        log_err(R"(Event doesn't have a note or it's not a string!)");
+        return false;
+    }
     if (!event_json.contains("id") || !event_json["id"].is_number_integer()) {
         log_err(R"(Event doesn't have an id or it's not an integer!)");
         return false;
@@ -167,5 +171,52 @@ Event::Event(const json &event_json) {
 
     for (size_t page_num = 0; page_num < page_count; ++page_num) {
         pages.emplace_back(EventPage(event_json["pages"][page_num]));
+    }
+}
+
+bool CommonEvent::is_valid(const json &common_event_json) const {
+    if (!common_event_json.contains("id") || !common_event_json["id"].is_number_integer()) {
+        log_err(R"(CommonEvent doesn't have an id or it's not an integer!)");
+        return false;
+    }
+    if (!common_event_json.contains("name") || !common_event_json["name"].is_string()) {
+        log_err(R"(CommonEvent doesn't have a name or it's not a string!)");
+        return false;
+    }
+    if (!common_event_json.contains("switchId") || !common_event_json["switchId"].is_number_integer()) {
+        log_err(R"(CommonEvent doesn't have a switch id or it's not an integer!)");
+        return false;
+    }
+    if (!common_event_json.contains("trigger") || !common_event_json["trigger"].is_number_integer()) {
+        log_err(R"(CommonEvent doesn't have a trigger or it's not an integer!)");
+        return false;
+    }
+    if (!common_event_json.contains("list")) {
+        log_err(R"(CommonEvent doesn't have commands!)");
+        return false;
+    }
+
+    return true;
+}
+
+bool CommonEvent::has_trigger() const {
+    return trigger != CommonEventTrigger::NONE;
+}
+
+CommonEvent::CommonEvent(const json &common_event_json) {
+    if (!is_valid(common_event_json)) {
+        return;
+    }
+
+    id = common_event_json["id"].get<uint32_t>();
+    name = common_event_json["name"].get<std::string_view>();
+    switch_id = common_event_json["switchId"].get<uint32_t>();
+    trigger = static_cast<CommonEventTrigger>(common_event_json["trigger"].get<uint32_t>());
+
+    const auto &command_list = common_event_json["list"];
+    list.reserve(command_list.size());
+
+    for (size_t line = 0, last_line = command_list.size(); line < last_line; ++line) {
+        list.emplace_back(Command(command_list[line]));
     }
 }

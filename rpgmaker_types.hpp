@@ -13,6 +13,12 @@ using variable_element =
 
 namespace RPGMaker {
 
+    enum class CommonEventTrigger : uint32_t {
+        NONE,
+        AUTORUN,
+        PARALLEL,
+    };
+
     enum class CommandCode : uint32_t {
         IF_STATEMENT = 111,
         CONTROL_SWITCH = 121,
@@ -26,7 +32,8 @@ namespace RPGMaker {
         // parameter 0
         enum class IDType : uint32_t {
             SWITCH,
-            VARIABLE
+            VARIABLE,
+            SCRIPT = 12,
         };
         // parameter 2
         enum class CompareType : uint32_t {
@@ -115,4 +122,21 @@ namespace RPGMaker {
         uint32_t x{};
         uint32_t y{};
     };
+
+    struct CommonEvent {
+
+        CommonEvent() = default;
+        CommonEvent(const json &common_event_json);
+
+        bool is_valid(const json &common_event_json) const;
+
+        bool has_trigger() const;
+
+        uint32_t id{};
+        std::vector<Command> list{};
+        std::string name{};
+        uint32_t switch_id{};
+        CommonEventTrigger trigger{};
+    };
+
 }; //RPGMaker
